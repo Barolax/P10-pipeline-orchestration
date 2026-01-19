@@ -1,0 +1,19 @@
+# Configuration des valeurs attendues pour les tests
+# Basés sur les résultats de l'analyse 
+
+nettoyage:
+  erp_apres_dedoublonnage: 825
+  liaison_apres_dedoublonnage: 825
+  web_apres_nettoyage: 1428
+  web_apres_dedoublonnage: 714
+
+fusion:
+  lignes_finales: 714
+
+calculs:
+  ca_total: 70568.60
+  tolerance_ca: 0.01  # Tolérance pour les arrondis
+
+identification:
+  vins_premium: 30
+  zscore_seuil: 2  # z-score > 2 = vin premium

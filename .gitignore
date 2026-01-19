@@ -1,0 +1,45 @@
+# Environnement virtuel
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Fichiers générés (outputs)
+outputs/
+*.xlsx
+*.csv
+!data_bottleneck/*.xlsx  # Garder les fichiers Excel sources
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Système
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Base de données temporaires
+*.db
+*.sqlite
+
+# Kestra (si besoin)
+.kestra/
+
+# Fichiers temporaires
+tmp/
+temp/

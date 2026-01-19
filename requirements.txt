@@ -1,0 +1,6 @@
+pandas
+   duckdb
+   openpyxl
+   jupyter
+   pyyaml
+   scipy
