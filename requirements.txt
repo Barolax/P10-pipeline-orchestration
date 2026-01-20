@@ -1,6 +1,8 @@
 pandas
-   duckdb
-   openpyxl
-   jupyter
-   pyyaml
-   scipy
+duckdb
+openpyxl
+jupyter
+pyyaml
+scipy
+matplotlib
+seaborn
