@@ -1,0 +1,421 @@
+id: bottleneck-pipeline
+namespace: bottleneck
+description: Pipeline automatisé pour le calcul du CA et l'identification des vins premium
+
+inputs:
+  - id: erp_file
+    type: FILE
+    description: Fichier ERP (erp.xlsx)
+  
+  - id: liaison_file
+    type: FILE
+    description: Fichier LIAISON (liaison.xlsx)
+  
+  - id: web_file
+    type: FILE
+    description: Fichier WEB (web.xlsx)
+  
+  - id: config_file
+    type: FILE
+    description: Fichier de configuration (test_config.yaml)
+
+tasks:
+  # =========================================
+  # ÉTAPE 1 : NETTOYAGE DES DONNÉES
+  # =========================================
+  
+  - id: nettoyage-complet
+    type: io.kestra.plugin.scripts.python.Script
+    description: Nettoyage ERP, LIAISON et WEB
+    docker:
+      image: bottleneck-pipeline:latest
+    inputFiles:
+      erp.xlsx: "{{ inputs.erp_file }}"
+      liaison.xlsx: "{{ inputs.liaison_file }}"
+      web.xlsx: "{{ inputs.web_file }}"
+    outputFiles:
+      - erp_clean.parquet
+      - liaison_clean.parquet
+      - web_clean.parquet
+      - web_dedup.parquet
+    script: |
+      import duckdb
+      import pandas as pd
+      
+      conn = duckdb.connect()
+      
+      print("=== NETTOYAGE ERP ===")
+      erp = pd.read_excel('erp.xlsx')
+      conn.register('erp_clean', erp)
+      nb_erp = conn.execute("SELECT COUNT(*) FROM erp_clean").fetchone()[0]
+      print(f"✅ ERP nettoyé: {nb_erp} lignes")
+      
+      print("\n=== NETTOYAGE LIAISON ===")
+      liaison = pd.read_excel('liaison.xlsx')
+      conn.register('liaison_clean', liaison)
+      nb_liaison = conn.execute("SELECT COUNT(*) FROM liaison_clean").fetchone()[0]
+      print(f"✅ LIAISON nettoyée: {nb_liaison} lignes")
+      
+      print("\n=== NETTOYAGE WEB ===")
+      web = pd.read_excel('web.xlsx')
+      web_clean = web.dropna(subset=['sku'])
+      conn.register('web_clean', web_clean)
+      nb_web_clean = conn.execute("SELECT COUNT(*) FROM web_clean").fetchone()[0]
+      print(f"✅ WEB nettoyé: {nb_web_clean} lignes")
+      
+      print("\n=== DÉDOUBLONNAGE WEB ===")
+      conn.execute("""
+          CREATE OR REPLACE TABLE web_dedup AS
+          SELECT * FROM (
+              SELECT *, ROW_NUMBER() OVER (PARTITION BY sku ORDER BY total_sales DESC) as rn
+              FROM web_clean
+          ) WHERE rn = 1
+      """)
+      conn.execute("ALTER TABLE web_dedup DROP COLUMN rn")
+      nb_web_dedup = conn.execute("SELECT COUNT(*) FROM web_dedup").fetchone()[0]
+      print(f"✅ WEB dédoublonné: {nb_web_dedup} lignes")
+      
+      # EXPORTER LES TABLES
+      print("\n=== EXPORT DES TABLES ===")
+      conn.execute("COPY erp_clean TO 'erp_clean.parquet' (FORMAT PARQUET)")
+      conn.execute("COPY liaison_clean TO 'liaison_clean.parquet' (FORMAT PARQUET)")
+      conn.execute("COPY web_clean TO 'web_clean.parquet' (FORMAT PARQUET)")
+      conn.execute("COPY web_dedup TO 'web_dedup.parquet' (FORMAT PARQUET)")
+      print("✅ Tables exportées")
+      
+      conn.close()
+
+  - id: test-nettoyage
+    type: io.kestra.plugin.scripts.python.Script
+    description: Tests de validation du nettoyage
+    docker:
+      image: bottleneck-pipeline:latest
+    inputFiles:
+      test_config.yaml: "{{ inputs.config_file }}"
+      erp_clean.parquet: "{{ outputs['nettoyage-complet'].outputFiles['erp_clean.parquet'] }}"
+      liaison_clean.parquet: "{{ outputs['nettoyage-complet'].outputFiles['liaison_clean.parquet'] }}"
+      web_clean.parquet: "{{ outputs['nettoyage-complet'].outputFiles['web_clean.parquet'] }}"
+      web_dedup.parquet: "{{ outputs['nettoyage-complet'].outputFiles['web_dedup.parquet'] }}"
+    script: |
+      import duckdb
+      import yaml
+      
+      with open('test_config.yaml', 'r') as f:
+          config = yaml.safe_load(f)
+      
+      conn = duckdb.connect()
+      
+      # IMPORTER LES TABLES
+      conn.execute("CREATE TABLE erp_clean AS SELECT * FROM 'erp_clean.parquet'")
+      conn.execute("CREATE TABLE liaison_clean AS SELECT * FROM 'liaison_clean.parquet'")
+      conn.execute("CREATE TABLE web_clean AS SELECT * FROM 'web_clean.parquet'")
+      conn.execute("CREATE TABLE web_dedup AS SELECT * FROM 'web_dedup.parquet'")
+      
+      print("=== TESTS NETTOYAGE ===\n")
+      
+      # Test ERP
+      result = conn.execute("SELECT COUNT(*) FROM erp_clean").fetchone()[0]
+      expected = config['nettoyage']['erp_apres_dedoublonnage']
+      assert result == expected, f"❌ ERP: {result} au lieu de {expected}"
+      print(f"✅ ERP: {result} lignes")
+      
+      # Test LIAISON
+      result = conn.execute("SELECT COUNT(*) FROM liaison_clean").fetchone()[0]
+      expected = config['nettoyage']['liaison_apres_dedoublonnage']
+      assert result == expected, f"❌ LIAISON: {result} au lieu de {expected}"
+      print(f"✅ LIAISON: {result} lignes")
+      
+      # Test WEB clean
+      result = conn.execute("SELECT COUNT(*) FROM web_clean").fetchone()[0]
+      expected = config['nettoyage']['web_apres_nettoyage']
+      assert result == expected, f"❌ WEB clean: {result} au lieu de {expected}"
+      print(f"✅ WEB clean: {result} lignes")
+      
+      # Test WEB dedup
+      result = conn.execute("SELECT COUNT(*) FROM web_dedup").fetchone()[0]
+      expected = config['nettoyage']['web_apres_dedoublonnage']
+      assert result == expected, f"❌ WEB dedup: {result} au lieu de {expected}"
+      print(f"✅ WEB dedup: {result} lignes")
+      
+      print("\n✅ Tous les tests de nettoyage OK !")
+      conn.close()
+
+  # =========================================
+  # ÉTAPE 2 : FUSION DES DONNÉES
+  # =========================================
+
+  - id: fusion-tables
+    type: io.kestra.plugin.scripts.python.Script
+    description: Fusion ERP + LIAISON + WEB
+    docker:
+      image: bottleneck-pipeline:latest
+    inputFiles:
+      erp_clean.parquet: "{{ outputs['nettoyage-complet'].outputFiles['erp_clean.parquet'] }}"
+      liaison_clean.parquet: "{{ outputs['nettoyage-complet'].outputFiles['liaison_clean.parquet'] }}"
+      web_dedup.parquet: "{{ outputs['nettoyage-complet'].outputFiles['web_dedup.parquet'] }}"
+    outputFiles:
+      - data_finale.parquet
+    script: |
+      import duckdb
+      
+      conn = duckdb.connect()
+      
+      # IMPORTER LES TABLES
+      conn.execute("CREATE TABLE erp_clean AS SELECT * FROM 'erp_clean.parquet'")
+      conn.execute("CREATE TABLE liaison_clean AS SELECT * FROM 'liaison_clean.parquet'")
+      conn.execute("CREATE TABLE web_dedup AS SELECT * FROM 'web_dedup.parquet'")
+      
+      print("=== FUSION ERP + LIAISON ===")
+      conn.execute("""
+          CREATE OR REPLACE TABLE erp_liaison AS
+          SELECT e.*, l.id_web
+          FROM erp_clean e
+          INNER JOIN liaison_clean l ON e.product_id = l.product_id
+      """)
+      nb_erp_liaison = conn.execute("SELECT COUNT(*) FROM erp_liaison").fetchone()[0]
+      print(f"✅ ERP + LIAISON: {nb_erp_liaison} lignes")
+      
+      print("\n=== FUSION AVEC WEB ===")
+      conn.execute("""
+          CREATE OR REPLACE TABLE data_finale AS
+          SELECT 
+              el.*,
+              w.total_sales,
+              w.post_title
+          FROM erp_liaison el
+          INNER JOIN web_dedup w ON el.id_web = w.sku
+      """)
+      nb_finale = conn.execute("SELECT COUNT(*) FROM data_finale").fetchone()[0]
+      print(f"✅ Fusion finale: {nb_finale} lignes")
+      
+      # EXPORTER
+      print("\n=== EXPORT ===")
+      conn.execute("COPY data_finale TO 'data_finale.parquet' (FORMAT PARQUET)")
+      print("✅ Table exportée")
+      
+      conn.close()
+
+  - id: test-fusion
+    type: io.kestra.plugin.scripts.python.Script
+    description: Tests de validation de la fusion
+    docker:
+      image: bottleneck-pipeline:latest
+    inputFiles:
+      test_config.yaml: "{{ inputs.config_file }}"
+      data_finale.parquet: "{{ outputs['fusion-tables'].outputFiles['data_finale.parquet'] }}"
+    script: |
+      import duckdb
+      import yaml
+      
+      with open('test_config.yaml', 'r') as f:
+          config = yaml.safe_load(f)
+      
+      conn = duckdb.connect()
+      
+      # IMPORTER
+      conn.execute("CREATE TABLE data_finale AS SELECT * FROM 'data_finale.parquet'")
+      
+      print("=== TESTS FUSION ===\n")
+      
+      result = conn.execute("SELECT COUNT(*) FROM data_finale").fetchone()[0]
+      expected = config['fusion']['lignes_finales']
+      assert result == expected, f"❌ Fusion: {result} au lieu de {expected}"
+      print(f"✅ Fusion finale: {result} lignes")
+      
+      print("\n✅ Test fusion OK !")
+      conn.close()
+
+  # =========================================
+  # ÉTAPE 3 : CALCUL DU CA
+  # =========================================
+
+  - id: calcul-ca
+    type: io.kestra.plugin.scripts.python.Script
+    description: Calcul du chiffre d'affaires
+    docker:
+      image: bottleneck-pipeline:latest
+    inputFiles:
+      data_finale.parquet: "{{ outputs['fusion-tables'].outputFiles['data_finale.parquet'] }}"
+    outputFiles:
+      - data_finale_ca.parquet
+      - ca_total.parquet
+    script: |
+      import duckdb
+      
+      conn = duckdb.connect()
+      
+      # IMPORTER
+      conn.execute("CREATE TABLE data_finale AS SELECT * FROM 'data_finale.parquet'")
+      
+      print("=== CALCUL CA ===")
+      conn.execute("ALTER TABLE data_finale ADD COLUMN IF NOT EXISTS ca DOUBLE")
+      conn.execute("UPDATE data_finale SET ca = price * total_sales")
+      
+      conn.execute("""
+          CREATE OR REPLACE TABLE ca_total AS
+          SELECT SUM(ca) as chiffre_affaires_total
+          FROM data_finale
+      """)
+      
+      ca = conn.execute("SELECT chiffre_affaires_total FROM ca_total").fetchone()[0]
+      print(f"✅ CA total: {ca:.2f}€")
+      
+      # EXPORTER
+      print("\n=== EXPORT ===")
+      conn.execute("COPY data_finale TO 'data_finale_ca.parquet' (FORMAT PARQUET)")
+      conn.execute("COPY ca_total TO 'ca_total.parquet' (FORMAT PARQUET)")
+      print("✅ Tables exportées")
+      
+      conn.close()
+
+  - id: test-ca
+    type: io.kestra.plugin.scripts.python.Script
+    description: Tests de validation du CA
+    docker:
+      image: bottleneck-pipeline:latest
+    inputFiles:
+      test_config.yaml: "{{ inputs.config_file }}"
+      ca_total.parquet: "{{ outputs['calcul-ca'].outputFiles['ca_total.parquet'] }}"
+    script: |
+      import duckdb
+      import yaml
+      
+      with open('test_config.yaml', 'r') as f:
+          config = yaml.safe_load(f)
+      
+      conn = duckdb.connect()
+      
+      # IMPORTER
+      conn.execute("CREATE TABLE ca_total AS SELECT * FROM 'ca_total.parquet'")
+      
+      print("=== TESTS CA ===\n")
+      
+      result = conn.execute("SELECT chiffre_affaires_total FROM ca_total").fetchone()[0]
+      expected = config['calculs']['ca_total']
+      tolerance = config['calculs']['tolerance_ca']
+      
+      diff = abs(result - expected)
+      assert diff < tolerance, f"❌ CA: {result}€ au lieu de {expected}€"
+      print(f"✅ CA total: {result:.2f}€ (attendu: {expected}€)")
+      
+      print("\n✅ Test CA OK !")
+      conn.close()
+
+  # =========================================
+  # ÉTAPE 4 : IDENTIFICATION VINS PREMIUM
+  # =========================================
+
+  - id: identification-premium
+    type: io.kestra.plugin.scripts.python.Script
+    description: Calcul z-score et séparation premium/ordinaires
+    docker:
+      image: bottleneck-pipeline:latest
+    inputFiles:
+      test_config.yaml: "{{ inputs.config_file }}"
+      data_finale_ca.parquet: "{{ outputs['calcul-ca'].outputFiles['data_finale_ca.parquet'] }}"
+    outputFiles:
+      - vins_premium.csv
+      - vins_ordinaires.csv
+      - vins_premium.parquet
+    script: |
+      import duckdb
+      import yaml
+      
+      with open('test_config.yaml', 'r') as f:
+          config = yaml.safe_load(f)
+      
+      conn = duckdb.connect()
+      
+      # IMPORTER
+      conn.execute("CREATE TABLE data_finale AS SELECT * FROM 'data_finale_ca.parquet'")
+      
+      seuil = config['identification']['zscore_seuil']
+      
+      print("=== CALCUL Z-SCORE ===")
+      conn.execute("ALTER TABLE data_finale ADD COLUMN IF NOT EXISTS z_score DOUBLE")
+      conn.execute("""
+          UPDATE data_finale
+          SET z_score = (price - (SELECT AVG(price) FROM data_finale)) / 
+                        (SELECT STDDEV(price) FROM data_finale)
+      """)
+      
+      print(f"\n=== SÉPARATION VINS (seuil z-score > {seuil}) ===")
+      conn.execute(f"""
+          CREATE OR REPLACE TABLE vins_premium AS
+          SELECT product_id, post_title, price, total_sales, ca, z_score
+          FROM data_finale
+          WHERE z_score > {seuil}
+          ORDER BY z_score DESC
+      """)
+      
+      conn.execute(f"""
+          CREATE OR REPLACE TABLE vins_ordinaires AS
+          SELECT product_id, post_title, price, total_sales, ca, z_score
+          FROM data_finale
+          WHERE z_score <= {seuil}
+          ORDER BY ca DESC
+      """)
+      
+      nb_premium = conn.execute("SELECT COUNT(*) FROM vins_premium").fetchone()[0]
+      nb_ordinaires = conn.execute("SELECT COUNT(*) FROM vins_ordinaires").fetchone()[0]
+      
+      print(f"✅ Vins premium: {nb_premium}")
+      print(f"✅ Vins ordinaires: {nb_ordinaires}")
+      
+      # EXPORTER
+      print("\n=== EXPORTS ===")
+      conn.execute("COPY vins_premium TO 'vins_premium.csv' (HEADER, DELIMITER ',')")
+      conn.execute("COPY vins_ordinaires TO 'vins_ordinaires.csv' (HEADER, DELIMITER ',')")
+      conn.execute("COPY vins_premium TO 'vins_premium.parquet' (FORMAT PARQUET)")
+      print("✅ Fichiers CSV et Parquet exportés")
+      
+      conn.close()
+
+  - id: test-premium
+    type: io.kestra.plugin.scripts.python.Script
+    description: Tests de validation vins premium
+    docker:
+      image: bottleneck-pipeline:latest
+    inputFiles:
+      test_config.yaml: "{{ inputs.config_file }}"
+      vins_premium.parquet: "{{ outputs['identification-premium'].outputFiles['vins_premium.parquet'] }}"
+    script: |
+      import duckdb
+      import yaml
+      
+      with open('test_config.yaml', 'r') as f:
+          config = yaml.safe_load(f)
+      
+      conn = duckdb.connect()
+      
+      # IMPORTER
+      conn.execute("CREATE TABLE vins_premium AS SELECT * FROM 'vins_premium.parquet'")
+      
+      print("=== TESTS VINS PREMIUM ===\n")
+      
+      result = conn.execute("SELECT COUNT(*) FROM vins_premium").fetchone()[0]
+      expected = config['identification']['vins_premium']
+      assert result == expected, f"❌ Vins premium: {result} au lieu de {expected}"
+      print(f"✅ Vins premium: {result} (attendu: {expected})")
+      
+      print("\n✅ Test vins premium OK !")
+      conn.close()
+
+  - id: notification-succes
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      ✅ Pipeline exécuté avec succès !
+      📊 Fichiers générés :
+         - vins_premium.csv
+         - vins_ordinaires.csv
+
+errors:
+  - id: notification-erreur
+    type: io.kestra.plugin.core.log.Log
+    message: "❌ Erreur détectée dans le pipeline !"
+
+triggers:
+  - id: schedule-monthly
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 9 15 * *"
+    description: Exécution automatique le 15 de chaque mois à 9h
