@@ -75,7 +75,6 @@ tasks:
       nb_web_dedup = conn.execute("SELECT COUNT(*) FROM web_dedup").fetchone()[0]
       print(f"✅ WEB dédoublonné: {nb_web_dedup} lignes")
       
-      # EXPORTER LES TABLES
       print("\n=== EXPORT DES TABLES ===")
       conn.execute("COPY erp_clean TO 'erp_clean.parquet' (FORMAT PARQUET)")
       conn.execute("COPY liaison_clean TO 'liaison_clean.parquet' (FORMAT PARQUET)")
@@ -85,16 +84,113 @@ tasks:
       
       conn.close()
 
-  - id: test-nettoyage
+  # =========================================
+  # TESTS NETTOYAGE (4 TESTS SÉPARÉS)
+  # =========================================
+
+  - id: test-nettoyage-erp
     type: io.kestra.plugin.scripts.python.Script
-    description: Tests de validation du nettoyage
+    description: "Test ERP : 825 lignes attendues"
     docker:
       image: bottleneck-pipeline:latest
     inputFiles:
       test_config.yaml: "{{ inputs.config_file }}"
       erp_clean.parquet: "{{ outputs['nettoyage-complet'].outputFiles['erp_clean.parquet'] }}"
+    script: |
+      import duckdb
+      import yaml
+      
+      with open('test_config.yaml', 'r') as f:
+          config = yaml.safe_load(f)
+      
+      conn = duckdb.connect()
+      conn.execute("CREATE TABLE erp_clean AS SELECT * FROM 'erp_clean.parquet'")
+      
+      result = conn.execute("SELECT COUNT(*) FROM erp_clean").fetchone()[0]
+      expected = config['nettoyage']['erp_apres_dedoublonnage']
+      
+      print(f"=== TEST ERP ===")
+      print(f"Résultat : {result} lignes")
+      print(f"Attendu  : {expected} lignes")
+      
+      if result != expected:
+          print(f"❌ ALERTE : Test ERP échoué !")
+          raise Exception(f"ERP : {result} lignes au lieu de {expected}")
+      
+      print("✅ Test ERP OK")
+      conn.close()
+
+  - id: test-nettoyage-liaison
+    type: io.kestra.plugin.scripts.python.Script
+    description: "Test LIAISON : 825 lignes attendues"
+    docker:
+      image: bottleneck-pipeline:latest
+    inputFiles:
+      test_config.yaml: "{{ inputs.config_file }}"
       liaison_clean.parquet: "{{ outputs['nettoyage-complet'].outputFiles['liaison_clean.parquet'] }}"
+    script: |
+      import duckdb
+      import yaml
+      
+      with open('test_config.yaml', 'r') as f:
+          config = yaml.safe_load(f)
+      
+      conn = duckdb.connect()
+      conn.execute("CREATE TABLE liaison_clean AS SELECT * FROM 'liaison_clean.parquet'")
+      
+      result = conn.execute("SELECT COUNT(*) FROM liaison_clean").fetchone()[0]
+      expected = config['nettoyage']['liaison_apres_dedoublonnage']
+      
+      print(f"=== TEST LIAISON ===")
+      print(f"Résultat : {result} lignes")
+      print(f"Attendu  : {expected} lignes")
+      
+      if result != expected:
+          print(f"❌ ALERTE : Test LIAISON échoué !")
+          raise Exception(f"LIAISON : {result} lignes au lieu de {expected}")
+      
+      print("✅ Test LIAISON OK")
+      conn.close()
+
+  - id: test-nettoyage-web-clean
+    type: io.kestra.plugin.scripts.python.Script
+    description: "Test WEB après nettoyage : 1428 lignes attendues"
+    docker:
+      image: bottleneck-pipeline:latest
+    inputFiles:
+      test_config.yaml: "{{ inputs.config_file }}"
       web_clean.parquet: "{{ outputs['nettoyage-complet'].outputFiles['web_clean.parquet'] }}"
+    script: |
+      import duckdb
+      import yaml
+      
+      with open('test_config.yaml', 'r') as f:
+          config = yaml.safe_load(f)
+      
+      conn = duckdb.connect()
+      conn.execute("CREATE TABLE web_clean AS SELECT * FROM 'web_clean.parquet'")
+      
+      result = conn.execute("SELECT COUNT(*) FROM web_clean").fetchone()[0]
+      expected = config['nettoyage']['web_apres_nettoyage']
+      
+      print(f"=== TEST WEB CLEAN ===")
+      print(f"Résultat : {result} lignes")
+      print(f"Attendu  : {expected} lignes")
+      
+      if result != expected:
+          print(f"❌ ALERTE : Test WEB CLEAN échoué !")
+          raise Exception(f"WEB CLEAN : {result} lignes au lieu de {expected}")
+      
+      print("✅ Test WEB CLEAN OK")
+      conn.close()
+
+  - id: test-nettoyage-web-dedup
+    type: io.kestra.plugin.scripts.python.Script
+    description: "Test WEB après dédoublonnage : 714 lignes attendues"
+    docker:
+      image: bottleneck-pipeline:latest
+    inputFiles:
+      test_config.yaml: "{{ inputs.config_file }}"
       web_dedup.parquet: "{{ outputs['nettoyage-complet'].outputFiles['web_dedup.parquet'] }}"
     script: |
       import duckdb
@@ -104,40 +200,20 @@ tasks:
           config = yaml.safe_load(f)
       
       conn = duckdb.connect()
-      
-      # IMPORTER LES TABLES
-      conn.execute("CREATE TABLE erp_clean AS SELECT * FROM 'erp_clean.parquet'")
-      conn.execute("CREATE TABLE liaison_clean AS SELECT * FROM 'liaison_clean.parquet'")
-      conn.execute("CREATE TABLE web_clean AS SELECT * FROM 'web_clean.parquet'")
       conn.execute("CREATE TABLE web_dedup AS SELECT * FROM 'web_dedup.parquet'")
       
-      print("=== TESTS NETTOYAGE ===\n")
-      
-      # Test ERP
-      result = conn.execute("SELECT COUNT(*) FROM erp_clean").fetchone()[0]
-      expected = config['nettoyage']['erp_apres_dedoublonnage']
-      assert result == expected, f"❌ ERP: {result} au lieu de {expected}"
-      print(f"✅ ERP: {result} lignes")
-      
-      # Test LIAISON
-      result = conn.execute("SELECT COUNT(*) FROM liaison_clean").fetchone()[0]
-      expected = config['nettoyage']['liaison_apres_dedoublonnage']
-      assert result == expected, f"❌ LIAISON: {result} au lieu de {expected}"
-      print(f"✅ LIAISON: {result} lignes")
-      
-      # Test WEB clean
-      result = conn.execute("SELECT COUNT(*) FROM web_clean").fetchone()[0]
-      expected = config['nettoyage']['web_apres_nettoyage']
-      assert result == expected, f"❌ WEB clean: {result} au lieu de {expected}"
-      print(f"✅ WEB clean: {result} lignes")
-      
-      # Test WEB dedup
       result = conn.execute("SELECT COUNT(*) FROM web_dedup").fetchone()[0]
       expected = config['nettoyage']['web_apres_dedoublonnage']
-      assert result == expected, f"❌ WEB dedup: {result} au lieu de {expected}"
-      print(f"✅ WEB dedup: {result} lignes")
       
-      print("\n✅ Tous les tests de nettoyage OK !")
+      print(f"=== TEST WEB DEDUP ===")
+      print(f"Résultat : {result} lignes")
+      print(f"Attendu  : {expected} lignes")
+      
+      if result != expected:
+          print(f"❌ ALERTE : Test WEB DEDUP échoué !")
+          raise Exception(f"WEB DEDUP : {result} lignes au lieu de {expected}")
+      
+      print("✅ Test WEB DEDUP OK")
       conn.close()
 
   # =========================================
@@ -160,7 +236,6 @@ tasks:
       
       conn = duckdb.connect()
       
-      # IMPORTER LES TABLES
       conn.execute("CREATE TABLE erp_clean AS SELECT * FROM 'erp_clean.parquet'")
       conn.execute("CREATE TABLE liaison_clean AS SELECT * FROM 'liaison_clean.parquet'")
       conn.execute("CREATE TABLE web_dedup AS SELECT * FROM 'web_dedup.parquet'")
@@ -188,7 +263,6 @@ tasks:
       nb_finale = conn.execute("SELECT COUNT(*) FROM data_finale").fetchone()[0]
       print(f"✅ Fusion finale: {nb_finale} lignes")
       
-      # EXPORTER
       print("\n=== EXPORT ===")
       conn.execute("COPY data_finale TO 'data_finale.parquet' (FORMAT PARQUET)")
       print("✅ Table exportée")
@@ -197,7 +271,7 @@ tasks:
 
   - id: test-fusion
     type: io.kestra.plugin.scripts.python.Script
-    description: Tests de validation de la fusion
+    description: "Test fusion : 714 lignes attendues"
     docker:
       image: bottleneck-pipeline:latest
     inputFiles:
@@ -211,18 +285,20 @@ tasks:
           config = yaml.safe_load(f)
       
       conn = duckdb.connect()
-      
-      # IMPORTER
       conn.execute("CREATE TABLE data_finale AS SELECT * FROM 'data_finale.parquet'")
-      
-      print("=== TESTS FUSION ===\n")
       
       result = conn.execute("SELECT COUNT(*) FROM data_finale").fetchone()[0]
       expected = config['fusion']['lignes_finales']
-      assert result == expected, f"❌ Fusion: {result} au lieu de {expected}"
-      print(f"✅ Fusion finale: {result} lignes")
       
-      print("\n✅ Test fusion OK !")
+      print(f"=== TEST FUSION ===")
+      print(f"Résultat : {result} lignes")
+      print(f"Attendu  : {expected} lignes")
+      
+      if result != expected:
+          print(f"❌ ALERTE : Test FUSION échoué !")
+          raise Exception(f"FUSION : {result} lignes au lieu de {expected}")
+      
+      print("✅ Test FUSION OK")
       conn.close()
 
   # =========================================
@@ -243,8 +319,6 @@ tasks:
       import duckdb
       
       conn = duckdb.connect()
-      
-      # IMPORTER
       conn.execute("CREATE TABLE data_finale AS SELECT * FROM 'data_finale.parquet'")
       
       print("=== CALCUL CA ===")
@@ -260,7 +334,6 @@ tasks:
       ca = conn.execute("SELECT chiffre_affaires_total FROM ca_total").fetchone()[0]
       print(f"✅ CA total: {ca:.2f}€")
       
-      # EXPORTER
       print("\n=== EXPORT ===")
       conn.execute("COPY data_finale TO 'data_finale_ca.parquet' (FORMAT PARQUET)")
       conn.execute("COPY ca_total TO 'ca_total.parquet' (FORMAT PARQUET)")
@@ -270,7 +343,7 @@ tasks:
 
   - id: test-ca
     type: io.kestra.plugin.scripts.python.Script
-    description: Tests de validation du CA
+    description: "Test CA : 70568.60€ attendu"
     docker:
       image: bottleneck-pipeline:latest
     inputFiles:
@@ -284,21 +357,23 @@ tasks:
           config = yaml.safe_load(f)
       
       conn = duckdb.connect()
-      
-      # IMPORTER
       conn.execute("CREATE TABLE ca_total AS SELECT * FROM 'ca_total.parquet'")
-      
-      print("=== TESTS CA ===\n")
       
       result = conn.execute("SELECT chiffre_affaires_total FROM ca_total").fetchone()[0]
       expected = config['calculs']['ca_total']
       tolerance = config['calculs']['tolerance_ca']
       
-      diff = abs(result - expected)
-      assert diff < tolerance, f"❌ CA: {result}€ au lieu de {expected}€"
-      print(f"✅ CA total: {result:.2f}€ (attendu: {expected}€)")
+      print(f"=== TEST CA ===")
+      print(f"Résultat : {result:.2f}€")
+      print(f"Attendu  : {expected}€")
+      print(f"Tolérance: {tolerance}€")
       
-      print("\n✅ Test CA OK !")
+      diff = abs(result - expected)
+      if diff >= tolerance:
+          print(f"❌ ALERTE : Test CA échoué ! (différence: {diff:.2f}€)")
+          raise Exception(f"CA : {result:.2f}€ au lieu de {expected}€")
+      
+      print("✅ Test CA OK")
       conn.close()
 
   # =========================================
@@ -325,8 +400,6 @@ tasks:
           config = yaml.safe_load(f)
       
       conn = duckdb.connect()
-      
-      # IMPORTER
       conn.execute("CREATE TABLE data_finale AS SELECT * FROM 'data_finale_ca.parquet'")
       
       seuil = config['identification']['zscore_seuil']
@@ -362,7 +435,6 @@ tasks:
       print(f"✅ Vins premium: {nb_premium}")
       print(f"✅ Vins ordinaires: {nb_ordinaires}")
       
-      # EXPORTER
       print("\n=== EXPORTS ===")
       conn.execute("COPY vins_premium TO 'vins_premium.csv' (HEADER, DELIMITER ',')")
       conn.execute("COPY vins_ordinaires TO 'vins_ordinaires.csv' (HEADER, DELIMITER ',')")
@@ -373,7 +445,7 @@ tasks:
 
   - id: test-premium
     type: io.kestra.plugin.scripts.python.Script
-    description: Tests de validation vins premium
+    description: "Test vins premium : 30 vins attendus"
     docker:
       image: bottleneck-pipeline:latest
     inputFiles:
@@ -387,19 +459,25 @@ tasks:
           config = yaml.safe_load(f)
       
       conn = duckdb.connect()
-      
-      # IMPORTER
       conn.execute("CREATE TABLE vins_premium AS SELECT * FROM 'vins_premium.parquet'")
-      
-      print("=== TESTS VINS PREMIUM ===\n")
       
       result = conn.execute("SELECT COUNT(*) FROM vins_premium").fetchone()[0]
       expected = config['identification']['vins_premium']
-      assert result == expected, f"❌ Vins premium: {result} au lieu de {expected}"
-      print(f"✅ Vins premium: {result} (attendu: {expected})")
       
-      print("\n✅ Test vins premium OK !")
+      print(f"=== TEST VINS PREMIUM ===")
+      print(f"Résultat : {result} vins")
+      print(f"Attendu  : {expected} vins")
+      
+      if result != expected:
+          print(f"❌ ALERTE : Test VINS PREMIUM échoué !")
+          raise Exception(f"VINS PREMIUM : {result} au lieu de {expected}")
+      
+      print("✅ Test VINS PREMIUM OK")
       conn.close()
+
+  # =========================================
+  # NOTIFICATION SUCCÈS
+  # =========================================
 
   - id: notification-succes
     type: io.kestra.plugin.core.log.Log
@@ -409,10 +487,18 @@ tasks:
          - vins_premium.csv
          - vins_ordinaires.csv
 
+# =========================================
+# GESTION DES ERREURS
+# =========================================
+
 errors:
   - id: notification-erreur
     type: io.kestra.plugin.core.log.Log
-    message: "❌ Erreur détectée dans le pipeline !"
+    message: "❌ Erreur détectée dans le pipeline ! Consultez les logs pour identifier le test qui a échoué."
+
+# =========================================
+# PLANIFICATION MENSUELLE
+# =========================================
 
 triggers:
   - id: schedule-monthly

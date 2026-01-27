@@ -16,4 +16,4 @@ calculs:
 
 identification:
   vins_premium: 30
-  zscore_seuil: 2  # z-score > 2 = vin premium
+  zscore_seuil: 2  # z-score > 2 = vin premium 
