@@ -43,12 +43,12 @@ P10 - mise en place pipeline orchestration de flux/
 │   └── premium/             # Script identification vins premium + tests
 ├── kestra/
 │   └── workflow.yaml        # Workflow d'orchestration
-├── diagrams/
-│   └── P10.drawio.png       # Logigramme du pipeline
+├── docs/
+│   ├── P10.drawio.png       # Logigramme du pipeline
+│   └── presentation.pdf     # Présentation PowerPoint soutenance
 ├── Dockerfile               # Image Docker personnalisée
 └── requirements.txt
 ```
-
 ---
 
 ## 🛠️ Technologies
