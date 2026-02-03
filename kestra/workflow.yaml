@@ -209,7 +209,7 @@ tasks:
       print(f"Résultat : {result} lignes")
       print(f"Attendu  : {expected} lignes")
       
-      if result != expected:
+      if result != expected:  
           print(f"❌ ALERTE : Test WEB DEDUP échoué !")
           raise Exception(f"WEB DEDUP : {result} lignes au lieu de {expected}")
       
